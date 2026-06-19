@@ -35,6 +35,11 @@ This log chronicles the process and discoveries made while reverse engineering t
     *   **Environmental Sensors:** Temperature (Register 16) and Humidity (Register 17) are signed integers scaled by `1/100` (e.g. `7780` $\rightarrow$ `77.80`).
     *   **AQI:** The Air Quality Index is not present in the registers; the MCU expects client software to calculate it.
 
+### Phase 5: Home Assistant Integration
+*   **Method:** We integrated a direct, zero-dependency REST client to push data to Home Assistant's `/api/states/sensor.temtop_<sensor_id>` endpoints using HTTP POST.
+*   **Token & Credentials:** Long-Lived Access Tokens and URLs are loaded from a local `.env` configuration file or environment variables (`HA_URL` and `HA_TOKEN`).
+*   **Asynchronous Updates:** Updates are dispatched inside background worker threads using Python's `threading` library, ensuring the local serial read and CSV logging loops are never blocked by Home Assistant network latency.
+
 ---
 
 ## Math & Algorithms Used

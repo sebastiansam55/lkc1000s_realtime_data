@@ -8,10 +8,14 @@ according to the verified register map, calculates US EPA AQI, and logs to CSV.
 import argparse
 import csv
 import datetime
+import json
 import os
 import sys
+import threading
 import time
 from typing import Dict, List, Optional, Tuple
+import urllib.error
+import urllib.request
 import serial
 import serial.tools.list_ports
 
@@ -30,9 +34,83 @@ class Colors:
 
 USE_COLOR = sys.stdout.isatty()
 
+# Home Assistant integration states
+HA_STATUS = "Not Configured"
+HA_LAST_UPDATE = "Never"
+
 def color(text: str, color_code: str) -> str:
     """Return colored text if stdout is a TTY/terminal, else return plain text."""
     return f"{color_code}{text}{Colors.END}" if USE_COLOR else text
+
+def load_env(env_path: str = ".env") -> Dict[str, str]:
+    """Manually parse a simple .env file without external dependencies."""
+    env_vars = {}
+    if os.path.exists(env_path):
+        try:
+            with open(env_path, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if "=" in line:
+                        key, val = line.split("=", 1)
+                        key = key.strip()
+                        val = val.strip().strip('"').strip("'")
+                        env_vars[key] = val
+        except Exception:
+            pass
+    return env_vars
+
+def post_all_to_ha(ha_url: str, token: str, sensor_data: Dict[str, Tuple[float, str, Optional[str], Optional[str]]]) -> None:
+    """Synchronous worker thread to post all sensor states to Home Assistant."""
+    global HA_STATUS, HA_LAST_UPDATE
+    errors = 0
+    err_msg = ""
+    for sensor_id, (val, name, unit, dev_class) in sensor_data.items():
+        url = f"{ha_url.rstrip('/')}/api/states/sensor.temtop_{sensor_id}"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "state": str(val),
+            "attributes": {
+                "friendly_name": f"Temtop {name}",
+                "state_class": "measurement"
+            }
+        }
+        if unit:
+            payload["attributes"]["unit_of_measurement"] = unit
+        if dev_class:
+            payload["attributes"]["device_class"] = dev_class
+            
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST"
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=2.0) as response:
+                response.read()
+        except Exception as e:
+            errors += 1
+            err_msg = str(e)
+            
+    if errors == 0:
+        HA_STATUS = "Connected / Up to date"
+        HA_LAST_UPDATE = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    else:
+        HA_STATUS = f"Error ({errors} failed, last: {err_msg[:30]})"
+
+def dispatch_ha_updates(ha_url: str, token: str, sensor_data: Dict[str, Tuple[float, str, Optional[str], Optional[str]]]) -> None:
+    """Dispatches a background thread to update Home Assistant without blocking sensor reading."""
+    t = threading.Thread(
+        target=post_all_to_ha,
+        args=(ha_url, token, sensor_data),
+        daemon=True
+    )
+    t.start()
 
 def calculate_crc(data: bytes) -> bytes:
     """Calculate the Modbus RTU CRC-16 checksum (low-byte first)."""
@@ -213,6 +291,8 @@ def main() -> None:
     parser.add_argument("-i", "--interval", type=float, default=5.0, help="Polling interval in seconds")
     parser.add_argument("-o", "--output", default="temtop_readings.csv", help="Output CSV filename")
     parser.add_argument("-t", "--timeout", type=float, default=0.5, help="Response timeout in seconds")
+    parser.add_argument("--ha", action="store_true", help="Enable Home Assistant REST API integration")
+    parser.add_argument("--env-file", default=".env", help="Path to .env configuration file")
     
     args = parser.parse_args()
     
@@ -226,6 +306,21 @@ def main() -> None:
         print(f"Invalid slave ID: {args.slave}")
         sys.exit(1)
         
+    # Parse Home Assistant details
+    ha_url = None
+    ha_token = None
+    env_vars = load_env(args.env_file)
+    ha_url = env_vars.get("HA_URL") or os.environ.get("HA_URL")
+    ha_token = env_vars.get("HA_TOKEN") or os.environ.get("HA_TOKEN")
+    ha_enabled = args.ha or (ha_url is not None and ha_token is not None)
+    
+    if ha_enabled:
+        if not ha_url or not ha_token:
+            print(color("[!]", Colors.FAIL) + " Home Assistant integration enabled but HA_URL or HA_TOKEN is missing from .env/environment.")
+            sys.exit(1)
+        global HA_STATUS
+        HA_STATUS = "Configured (Awaiting first update)"
+
     # Write CSV header if file doesn't exist
     file_exists = os.path.exists(args.output)
     try:
@@ -322,6 +417,21 @@ def main() -> None:
                 except OSError as e:
                     print(f"\n{color('[!]', Colors.FAIL)} Error writing to CSV file: {e}")
                     
+                # Dispatch Home Assistant updates in background
+                if ha_enabled:
+                    ha_data = {
+                        "pm25": (pm25, "PM2.5", "µg/m³", "pm25"),
+                        "pm10": (pm10, "PM10", "µg/m³", "pm10"),
+                        "particles": (particles, "Particle Count", "per/L", None),
+                        "hcho": (hcho, "Formaldehyde", "mg/m³", "volatile_organic_compounds"),
+                        "tvoc": (tvoc, "TVOC", "mg/m³", "volatile_organic_compounds"),
+                        "temp_f": (temp_f, "Temperature (F)", "°F", "temperature"),
+                        "temp_c": (temp_c, "Temperature (C)", "°C", "temperature"),
+                        "humidity": (humidity, "Humidity", "%", "humidity"),
+                        "aqi": (aqi_overall, "AQI", None, "aqi")
+                    }
+                    dispatch_ha_updates(ha_url, ha_token, ha_data)
+                    
                 # 5. Render live dashboard
                 sys.stdout.write("\033[H\033[J") # Clear console screen
                 print(color("=== TEMTOP LKC-1000S+ REAL-TIME MONITOR ===", Colors.HEADER + Colors.BOLD))
@@ -356,7 +466,14 @@ def main() -> None:
                 # Environmental Block
                 print(f" Temperature         : {color(f'{temp_f:>5.1f}', Colors.BOLD)} °F  /  {color(f'{temp_c:>4.1f}', Colors.BOLD)} °C")
                 print(f" Humidity            : {color(f'{humidity:>5.1f}', Colors.BOLD)} %RH")
-                print("=" * 48)
+                print("-" * 48)
+                
+                # Home Assistant Block
+                if ha_enabled:
+                    ha_status_col = Colors.GREEN if "Up to date" in HA_STATUS or "Success" in HA_STATUS or "Connected" in HA_STATUS else Colors.WARNING
+                    print(f" Home Assistant      : {color(HA_STATUS, ha_status_col)}")
+                    print(f" HA Last Update      : {HA_LAST_UPDATE}")
+                    print("-" * 48)
                 print(color("[*] Polling sensor. Press Ctrl+C to exit.", Colors.BLUE))
                 
             else:

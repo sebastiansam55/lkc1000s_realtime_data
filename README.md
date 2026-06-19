@@ -67,6 +67,33 @@ To start real-time data capture, display the live dashboard, and log values to a
 python3 temtop_monitor.py --port /dev/ttyACM1 --interval 5.0 --output my_air_readings.csv
 ```
 
+### 4. Integrate with Home Assistant (Optional)
+The monitoring script can publish all measurements to Home Assistant in real-time using HA's REST API. It runs in a background thread to prevent latency.
+
+1. Create a `.env` file in the project directory based on the template:
+   ```bash
+   cp .env.example .env
+   ```
+2. Open `.env` and fill in your Home Assistant URL and Long-Lived Access Token:
+   ```env
+   HA_URL=http://homeassistant.local:8123
+   HA_TOKEN=your_token_here
+   ```
+3. Run the script with the `--ha` flag (or it will auto-enable if `HA_URL` and `HA_TOKEN` are detected in `.env`):
+   ```bash
+   python3 temtop_monitor.py --port /dev/ttyACM1 --ha
+   ```
+
+The script will automatically register and update the following entities in Home Assistant:
+* `sensor.temtop_pm25` (PM2.5 concentration, unit `µg/m³`, class `pm25`)
+* `sensor.temtop_pm10` (PM10 concentration, unit `µg/m³`, class `pm10`)
+* `sensor.temtop_particles` (Particle count, unit `per/L`)
+* `sensor.temtop_hcho` (Formaldehyde, unit `mg/m³`, class `volatile_organic_compounds`)
+* `sensor.temtop_tvoc` (TVOC, unit `mg/m³`, class `volatile_organic_compounds`)
+* `sensor.temtop_temp_f` / `sensor.temtop_temp_c` (Temperature, class `temperature`)
+* `sensor.temtop_humidity` (Humidity, unit `%`, class `humidity`)
+* `sensor.temtop_aqi` (Overall computed AQI, class `aqi`)
+
 ---
 
 ## Utility Scripts
