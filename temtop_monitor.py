@@ -19,6 +19,12 @@ import urllib.request
 import serial
 import serial.tools.list_ports
 
+try:
+    import paho.mqtt.client as mqtt
+    MQTT_AVAILABLE = True
+except ImportError:
+    MQTT_AVAILABLE = False
+
 # Colors for terminal styling
 class Colors:
     HEADER = '\033[95m'
@@ -34,9 +40,13 @@ class Colors:
 
 USE_COLOR = sys.stdout.isatty()
 
-# Home Assistant integration states
+# Home Assistant REST integration states
 HA_STATUS = "Not Configured"
 HA_LAST_UPDATE = "Never"
+
+# Home Assistant MQTT integration states
+MQTT_STATUS = "Not Configured"
+MQTT_LAST_UPDATE = "Never"
 
 def color(text: str, color_code: str) -> str:
     """Return colored text if stdout is a TTY/terminal, else return plain text."""
@@ -108,6 +118,79 @@ def dispatch_ha_updates(ha_url: str, token: str, sensor_data: Dict[str, Tuple[fl
     t = threading.Thread(
         target=post_all_to_ha,
         args=(ha_url, token, sensor_data),
+        daemon=True
+    )
+    t.start()
+
+def connect_mqtt(host: str, port: int, user: Optional[str], password: Optional[str]) -> 'mqtt.Client':
+    """Establishes an MQTT connection, handling paho-mqtt v1/v2 compatibility."""
+    try:
+        from paho.mqtt.enums import CallbackAPIVersion
+        client = mqtt.Client(CallbackAPIVersion.VERSION2)
+    except (ImportError, AttributeError):
+        client = mqtt.Client()
+        
+    if user and password:
+        client.username_pw_set(user, password)
+    client.connect(host, port, keepalive=60)
+    client.loop_start()
+    return client
+
+def publish_mqtt_discovery(client: 'mqtt.Client', prefix: str, slave_id: int) -> None:
+    """Publishes MQTT Home Assistant Discovery payloads to group entities under a single device."""
+    sensors = {
+        "pm25": ("PM2.5", "µg/m³", "pm25", "{{ value_json.pm25 }}"),
+        "pm10": ("PM10", "µg/m³", "pm10", "{{ value_json.pm10 }}"),
+        "particles": ("Particle Count", "per/L", None, "{{ value_json.particles }}"),
+        "hcho": ("Formaldehyde", "mg/m³", "volatile_organic_compounds", "{{ value_json.hcho }}"),
+        "tvoc": ("TVOC", "mg/m³", "volatile_organic_compounds", "{{ value_json.tvoc }}"),
+        "temp_f": ("Temperature (F)", "°F", "temperature", "{{ value_json.temp_f }}"),
+        "temp_c": ("Temperature (C)", "°C", "temperature", "{{ value_json.temp_c }}"),
+        "humidity": ("Humidity", "%", "humidity", "{{ value_json.humidity }}"),
+        "aqi": ("AQI", None, "aqi", "{{ value_json.aqi }}")
+    }
+    
+    device_info = {
+        "identifiers": [f"temtop_lkc1000s_{slave_id}"],
+        "name": f"Temtop LKC-1000S+ (Slave {slave_id})",
+        "model": "LKC-1000S+ 2nd Gen",
+        "manufacturer": "Temtop"
+    }
+    
+    state_topic = f"temtop/lkc1000s_{slave_id}/state"
+    
+    for sensor_id, (name, unit, dev_class, val_tpl) in sensors.items():
+        config_topic = f"{prefix}/sensor/temtop_{slave_id}/{sensor_id}/config"
+        config_payload = {
+            "name": f"Temtop {name}",
+            "state_topic": state_topic,
+            "value_template": val_tpl,
+            "unique_id": f"temtop_{slave_id}_{sensor_id}",
+            "device": device_info
+        }
+        if unit:
+            config_payload["unit_of_measurement"] = unit
+        if dev_class:
+            config_payload["device_class"] = dev_class
+            
+        client.publish(config_topic, json.dumps(config_payload), retain=True)
+
+def publish_mqtt_state(client: 'mqtt.Client', slave_id: int, data: Dict[str, float]) -> None:
+    """Worker thread target to publish the real-time sensor state to the MQTT broker."""
+    global MQTT_STATUS, MQTT_LAST_UPDATE
+    state_topic = f"temtop/lkc1000s_{slave_id}/state"
+    try:
+        client.publish(state_topic, json.dumps(data), retain=True)
+        MQTT_STATUS = "Connected / Up to date"
+        MQTT_LAST_UPDATE = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    except Exception as e:
+        MQTT_STATUS = f"Error: {str(e)[:40]}"
+
+def dispatch_mqtt_update(client: 'mqtt.Client', slave_id: int, data: Dict[str, float]) -> None:
+    """Dispatches a background thread to update the MQTT broker without blocking the polling loop."""
+    t = threading.Thread(
+        target=publish_mqtt_state,
+        args=(client, slave_id, data),
         daemon=True
     )
     t.start()
@@ -292,6 +375,7 @@ def main() -> None:
     parser.add_argument("-o", "--output", default="temtop_readings.csv", help="Output CSV filename")
     parser.add_argument("-t", "--timeout", type=float, default=0.5, help="Response timeout in seconds")
     parser.add_argument("--ha", action="store_true", help="Enable Home Assistant REST API integration")
+    parser.add_argument("--mqtt", action="store_true", help="Enable Home Assistant MQTT Discovery integration")
     parser.add_argument("--env-file", default=".env", help="Path to .env configuration file")
     
     args = parser.parse_args()
@@ -306,9 +390,7 @@ def main() -> None:
         print(f"Invalid slave ID: {args.slave}")
         sys.exit(1)
         
-    # Parse Home Assistant details
-    ha_url = None
-    ha_token = None
+    # Parse Home Assistant REST details
     env_vars = load_env(args.env_file)
     ha_url = env_vars.get("HA_URL") or os.environ.get("HA_URL")
     ha_token = env_vars.get("HA_TOKEN") or os.environ.get("HA_TOKEN")
@@ -316,10 +398,45 @@ def main() -> None:
     
     if ha_enabled:
         if not ha_url or not ha_token:
-            print(color("[!]", Colors.FAIL) + " Home Assistant integration enabled but HA_URL or HA_TOKEN is missing from .env/environment.")
+            print(color("[!]", Colors.FAIL) + " Home Assistant REST integration enabled but HA_URL or HA_TOKEN is missing from .env/environment.")
             sys.exit(1)
         global HA_STATUS
         HA_STATUS = "Configured (Awaiting first update)"
+
+    # Parse Home Assistant MQTT details
+    mqtt_host = env_vars.get("MQTT_HOST") or os.environ.get("MQTT_HOST")
+    mqtt_port_str = env_vars.get("MQTT_PORT") or os.environ.get("MQTT_PORT") or "1883"
+    mqtt_user = env_vars.get("MQTT_USER") or os.environ.get("MQTT_USER")
+    mqtt_pass = env_vars.get("MQTT_PASSWORD") or os.environ.get("MQTT_PASSWORD")
+    mqtt_prefix = env_vars.get("MQTT_TOPIC_PREFIX") or os.environ.get("MQTT_TOPIC_PREFIX") or "homeassistant"
+    
+    mqtt_enabled = args.mqtt or (mqtt_host is not None)
+    mqtt_client = None
+    
+    if mqtt_enabled:
+        if not MQTT_AVAILABLE:
+            print(color("[!]", Colors.FAIL) + " MQTT enabled but 'paho-mqtt' library is not installed.")
+            print("Please install it using: pip install paho-mqtt")
+            sys.exit(1)
+        if not mqtt_host:
+            print(color("[!]", Colors.FAIL) + " MQTT enabled but MQTT_HOST is missing from .env/environment.")
+            sys.exit(1)
+        try:
+            mqtt_port = int(mqtt_port_str)
+        except ValueError:
+            print(color("[!]", Colors.FAIL) + f" Invalid MQTT port: {mqtt_port_str}")
+            sys.exit(1)
+            
+        global MQTT_STATUS
+        MQTT_STATUS = "Connecting..."
+        try:
+            mqtt_client = connect_mqtt(mqtt_host, mqtt_port, mqtt_user, mqtt_pass)
+            MQTT_STATUS = "Connected (Publishing Discovery...)"
+            # Publish HA discovery configurations once at startup
+            publish_mqtt_discovery(mqtt_client, mqtt_prefix, slave_id)
+            MQTT_STATUS = "Discovery Config Sent (Awaiting data)"
+        except Exception as e:
+            MQTT_STATUS = f"Connection Failed: {str(e)[:30]}"
 
     # Write CSV header if file doesn't exist
     file_exists = os.path.exists(args.output)
@@ -417,7 +534,7 @@ def main() -> None:
                 except OSError as e:
                     print(f"\n{color('[!]', Colors.FAIL)} Error writing to CSV file: {e}")
                     
-                # Dispatch Home Assistant updates in background
+                # Dispatch Home Assistant REST updates in background
                 if ha_enabled:
                     ha_data = {
                         "pm25": (pm25, "PM2.5", "µg/m³", "pm25"),
@@ -431,6 +548,21 @@ def main() -> None:
                         "aqi": (aqi_overall, "AQI", None, "aqi")
                     }
                     dispatch_ha_updates(ha_url, ha_token, ha_data)
+                    
+                # Dispatch MQTT updates in background (Single JSON state payload)
+                if mqtt_enabled and mqtt_client is not None:
+                    mqtt_data = {
+                        "pm25": pm25,
+                        "pm10": pm10,
+                        "particles": particles,
+                        "hcho": hcho,
+                        "tvoc": tvoc,
+                        "temp_f": temp_f,
+                        "temp_c": temp_c,
+                        "humidity": humidity,
+                        "aqi": aqi_overall
+                    }
+                    dispatch_mqtt_update(mqtt_client, slave_id, mqtt_data)
                     
                 # 5. Render live dashboard
                 sys.stdout.write("\033[H\033[J") # Clear console screen
@@ -468,11 +600,18 @@ def main() -> None:
                 print(f" Humidity            : {color(f'{humidity:>5.1f}', Colors.BOLD)} %RH")
                 print("-" * 48)
                 
-                # Home Assistant Block
+                # Home Assistant REST Block
                 if ha_enabled:
                     ha_status_col = Colors.GREEN if "Up to date" in HA_STATUS or "Success" in HA_STATUS or "Connected" in HA_STATUS else Colors.WARNING
-                    print(f" Home Assistant      : {color(HA_STATUS, ha_status_col)}")
-                    print(f" HA Last Update      : {HA_LAST_UPDATE}")
+                    print(f" HA REST Integration : {color(HA_STATUS, ha_status_col)}")
+                    print(f" HA REST Last Update : {HA_LAST_UPDATE}")
+                    print("-" * 48)
+                    
+                # Home Assistant MQTT Block
+                if mqtt_enabled:
+                    mqtt_status_col = Colors.GREEN if "Up to date" in MQTT_STATUS or "Success" in MQTT_STATUS or "Connected" in MQTT_STATUS else Colors.WARNING
+                    print(f" HA MQTT Device Link : {color(MQTT_STATUS, mqtt_status_col)}")
+                    print(f" HA MQTT Last Update : {MQTT_LAST_UPDATE}")
                     print("-" * 48)
                 print(color("[*] Polling sensor. Press Ctrl+C to exit.", Colors.BLUE))
                 

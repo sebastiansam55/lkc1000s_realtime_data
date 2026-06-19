@@ -68,31 +68,55 @@ python3 temtop_monitor.py --port /dev/ttyACM1 --interval 5.0 --output my_air_rea
 ```
 
 ### 4. Integrate with Home Assistant (Optional)
-The monitoring script can publish all measurements to Home Assistant in real-time using HA's REST API. It runs in a background thread to prevent latency.
+The monitoring script supports two ingestion methods to push measurements to Home Assistant in real-time. Both methods run in background threads to guarantee zero polling lag.
 
-1. Create a `.env` file in the project directory based on the template:
+#### Option A: MQTT Discovery (Recommended - Groups all entities into a single device)
+Using MQTT Discovery, all sensors are natively registered under a single cohesive Device in Home Assistant (named `Temtop LKC-1000S+ (Slave 254)`).
+
+1. Install the `paho-mqtt` library:
+   ```bash
+   pip install paho-mqtt
+   ```
+2. Create a `.env` file based on the template:
    ```bash
    cp .env.example .env
    ```
-2. Open `.env` and fill in your Home Assistant URL and Long-Lived Access Token:
+3. Populate the MQTT connection details in your `.env`:
+   ```env
+   MQTT_HOST=192.168.1.100
+   MQTT_PORT=1883
+   MQTT_USER=your_username
+   MQTT_PASSWORD=your_password
+   ```
+4. Run the monitor script (auto-enables if `MQTT_HOST` is present in `.env`):
+   ```bash
+   python3 temtop_monitor.py --port /dev/ttyACM1
+   ```
+
+#### Option B: REST API (Creates independent entities)
+Creates individual entities directly without grouping them in the Home Assistant Device Registry.
+
+1. Populate your Home Assistant URL and token in `.env`:
    ```env
    HA_URL=http://homeassistant.local:8123
    HA_TOKEN=your_token_here
    ```
-3. Run the script with the `--ha` flag (or it will auto-enable if `HA_URL` and `HA_TOKEN` are detected in `.env`):
+2. Run the monitor script (auto-enables if `HA_URL` is present in `.env`):
    ```bash
    python3 temtop_monitor.py --port /dev/ttyACM1 --ha
    ```
 
-The script will automatically register and update the following entities in Home Assistant:
-* `sensor.temtop_pm25` (PM2.5 concentration, unit `µg/m³`, class `pm25`)
-* `sensor.temtop_pm10` (PM10 concentration, unit `µg/m³`, class `pm10`)
-* `sensor.temtop_particles` (Particle count, unit `per/L`)
-* `sensor.temtop_hcho` (Formaldehyde, unit `mg/m³`, class `volatile_organic_compounds`)
-* `sensor.temtop_tvoc` (TVOC, unit `mg/m³`, class `volatile_organic_compounds`)
-* `sensor.temtop_temp_f` / `sensor.temtop_temp_c` (Temperature, class `temperature`)
-* `sensor.temtop_humidity` (Humidity, unit `%`, class `humidity`)
-* `sensor.temtop_aqi` (Overall computed AQI, class `aqi`)
+---
+
+The script automatically exposes the following entities to Home Assistant (in both methods):
+* `sensor.temtop_254_pm25` (PM2.5 concentration, unit `µg/m³`, class `pm25`)
+* `sensor.temtop_254_pm10` (PM10 concentration, unit `µg/m³`, class `pm10`)
+* `sensor.temtop_254_particles` (Particle count, unit `per/L`)
+* `sensor.temtop_254_hcho` (Formaldehyde, unit `mg/m³`, class `volatile_organic_compounds`)
+* `sensor.temtop_254_tvoc` (TVOC, unit `mg/m³`, class `volatile_organic_compounds`)
+* `sensor.temtop_254_temp_f` / `sensor.temtop_254_temp_c` (Temperature, class `temperature`)
+* `sensor.temtop_254_humidity` (Humidity, unit `%`, class `humidity`)
+* `sensor.temtop_254_aqi` (Overall computed AQI, class `aqi`)
 
 ---
 
