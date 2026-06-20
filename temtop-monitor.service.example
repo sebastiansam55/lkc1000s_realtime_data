@@ -1,0 +1,20 @@
+[Unit]
+Description=Temtop LKC-1000S+ Air Quality Monitor Logger
+After=network.target
+
+[Service]
+Type=simple
+User=sam
+WorkingDirectory=/home/sam/temtop
+
+# Configuration:
+# 1. We use a persistent udev symlink (/dev/temtop_monitor) instead of /dev/ttyACM1.
+#    This prevents conflicts when other USB serial devices are plugged/unplugged.
+# 2. Systemd loads the Home Assistant credentials directly from your .env file.
+ExecStart=/usr/bin/python3 temtop_monitor.py --port /dev/temtop_monitor --output /home/sam/temtop/temtop_readings.csv --interval 5.0
+Restart=always
+RestartSec=5
+EnvironmentFile=/home/sam/temtop/.env
+
+[Install]
+WantedBy=multi-user.target

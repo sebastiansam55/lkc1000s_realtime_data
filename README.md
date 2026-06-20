@@ -120,6 +120,69 @@ The script automatically exposes the following entities to Home Assistant (in bo
 
 ---
 
+## Production Deployment & Service Setup
+
+When deploying to a production server with other similar USB serial devices connected, dynamic device paths (like `/dev/ttyACM0`/`ACM1`) can shift upon reboot or replug. To ensure the script always connects to the correct physical Temtop device, use one of the two persistent mapping methods below:
+
+### Method A: Use Built-in Linux Serial Symlinks (Easiest)
+Linux automatically creates unique, persistent symbolic links for all connected USB serial devices under `/dev/serial/by-id/`. 
+
+1. List the connected serial devices:
+   ```bash
+   ls -l /dev/serial/by-id/
+   ```
+2. Identify your Temtop device (which uses an STMicroelectronics virtual COM port with Vendor `0483` and Product `5740`). It will look similar to:
+   ```
+   usb-STMicroelectronics_Virtual_COM_Port_34823984398-if00 -> ../../ttyACM1
+   ```
+3. Pass this exact path directly to the monitor command (or in your systemd service):
+   ```bash
+   python3 temtop_monitor.py --port /dev/serial/by-id/usb-STMicroelectronics_Virtual_COM_Port_34823984398-if00
+   ```
+
+---
+
+### Method B: Create a Custom Udev Symlink
+If you prefer a clean alias like `/dev/temtop_monitor`, you can write a custom `udev` rule:
+
+1. Retrieve the unique USB serial number of the connected Temtop device:
+   ```bash
+   udevadm info -a -n /dev/ttyACM1 | grep -i "serial" | head -n 1
+   ```
+   *(Ensure the port matches the current active port, e.g., `/dev/ttyACM1`)*
+2. Create a new udev rule file `/etc/udev/rules.d/99-temtop.rules`:
+   ```udev
+   SUBSYSTEM=="tty", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="5740", ATTRS{serial}=="YOUR_DEVICE_SERIAL_HERE", SYMLINK+="temtop_monitor"
+   ```
+3. Reload the udev subsystem:
+   ```bash
+   sudo udevadm control --reload-rules && sudo udevadm trigger
+   ```
+4. Now, the device will always link to `/dev/temtop_monitor`, regardless of what USB slot it is plugged into.
+
+---
+
+### Installing the Systemd Service
+To run the monitor continuously in the background as a system service:
+
+1. Copy the systemd service template to the system directory:
+   ```bash
+   sudo cp temtop-monitor.service.example /etc/systemd/system/temtop-monitor.service
+   ```
+2. Edit `/etc/systemd/system/temtop-monitor.service` to verify that the path in `ExecStart` points to your persistent serial symlink (from Method A or B).
+3. Reload systemd, enable the service to start at boot, and start it:
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable temtop-monitor.service
+   sudo systemctl start temtop-monitor.service
+   ```
+4. View the service logs:
+   ```bash
+   journalctl -u temtop-monitor.service -f
+   ```
+
+---
+
 ## Utility Scripts
 
 *   `fuzzer.py`: General port fuzzer used to test default baud rates and discover initial responsive command headers.
