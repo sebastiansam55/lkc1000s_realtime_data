@@ -62,9 +62,13 @@ sudo usermod -a -G dialout $USER
 ```
 
 ### 3. Run the Live Monitor & Logger
-To start real-time data capture, display the live dashboard, and log values to a CSV file:
+To start real-time data capture and display the live dashboard:
 ```bash
-python3 temtop_monitor.py --port /dev/ttyACM1 --interval 5.0 --output my_air_readings.csv
+# Option A: Log to a custom file path (defaults to 'temtop_readings.csv' in the local folder if omitted)
+python3 temtop_monitor.py --port /dev/ttyACM1 --output my_air_readings.csv
+
+# Option B: Run without local CSV file writes (Home Assistant / MQTT publishing only)
+python3 temtop_monitor.py --port /dev/ttyACM1 --no-csv
 ```
 
 ### 4. Integrate with Home Assistant (Optional)

@@ -376,6 +376,7 @@ def main() -> None:
     parser.add_argument("-t", "--timeout", type=float, default=0.5, help="Response timeout in seconds")
     parser.add_argument("--ha", action="store_true", help="Enable Home Assistant REST API integration")
     parser.add_argument("--mqtt", action="store_true", help="Enable Home Assistant MQTT Discovery integration")
+    parser.add_argument("--no-csv", action="store_true", help="Disable logging to local CSV file")
     parser.add_argument("--env-file", default=".env", help="Path to .env configuration file")
     
     args = parser.parse_args()
@@ -438,23 +439,24 @@ def main() -> None:
         except Exception as e:
             MQTT_STATUS = f"Connection Failed: {str(e)[:30]}"
 
-    # Write CSV header if file doesn't exist
-    file_exists = os.path.exists(args.output)
-    try:
-        with open(args.output, 'a', newline='') as csvfile:
-            writer = csv.writer(csvfile)
-            if not file_exists:
-                writer.writerow([
-                    "Timestamp", "Device_Time", 
-                    "PM2.5(ug/m3)", "PM10(ug/m3)", "Particles(per/L)", 
-                    "AQI_PM2.5", "AQI_PM10", "AQI_Overall",
-                    "HCHO(mg/m3)", "TVOC(mg/m3)", 
-                    "Temp(F)", "Temp(C)", "Humidity(%RH)"
-                ])
-                print(f"Created new CSV file: {args.output}")
-    except OSError as e:
-        print(f"Error initializing CSV file: {e}")
-        sys.exit(1)
+    # Write CSV header if file doesn't exist and CSV logging is enabled
+    if not args.no_csv:
+        file_exists = os.path.exists(args.output)
+        try:
+            with open(args.output, 'a', newline='') as csvfile:
+                writer = csv.writer(csvfile)
+                if not file_exists:
+                    writer.writerow([
+                        "Timestamp", "Device_Time", 
+                        "PM2.5(ug/m3)", "PM10(ug/m3)", "Particles(per/L)", 
+                        "AQI_PM2.5", "AQI_PM10", "AQI_Overall",
+                        "HCHO(mg/m3)", "TVOC(mg/m3)", 
+                        "Temp(F)", "Temp(C)", "Humidity(%RH)"
+                    ])
+                    print(f"Created new CSV file: {args.output}")
+        except OSError as e:
+            print(f"Error initializing CSV file: {e}")
+            sys.exit(1)
         
     try:
         ser = serial.Serial(args.port, args.baud, timeout=args.timeout)
@@ -520,19 +522,20 @@ def main() -> None:
                 aqi_pm10 = calculate_aqi_pm10(pm10)
                 aqi_overall = max(aqi_pm25, aqi_pm10)
                 
-                # 4. Log to CSV
-                try:
-                    with open(args.output, 'a', newline='') as csvfile:
-                        writer = csv.writer(csvfile)
-                        writer.writerow([
-                            pc_timestamp, dev_time_str,
-                            f"{pm25:.1f}", f"{pm10:.1f}", particles,
-                            aqi_pm25, aqi_pm10, aqi_overall,
-                            f"{hcho:.3f}", f"{tvoc:.3f}",
-                            f"{temp_f:.2f}", f"{temp_c:.2f}", f"{humidity:.2f}"
-                        ])
-                except OSError as e:
-                    print(f"\n{color('[!]', Colors.FAIL)} Error writing to CSV file: {e}")
+                # 4. Log to CSV (if enabled)
+                if not args.no_csv:
+                    try:
+                        with open(args.output, 'a', newline='') as csvfile:
+                            writer = csv.writer(csvfile)
+                            writer.writerow([
+                                pc_timestamp, dev_time_str,
+                                f"{pm25:.1f}", f"{pm10:.1f}", particles,
+                                aqi_pm25, aqi_pm10, aqi_overall,
+                                f"{hcho:.3f}", f"{tvoc:.3f}",
+                                f"{temp_f:.2f}", f"{temp_c:.2f}", f"{humidity:.2f}"
+                            ])
+                    except OSError as e:
+                        print(f"\n{color('[!]', Colors.FAIL)} Error writing to CSV file: {e}")
                     
                 # Dispatch Home Assistant REST updates in background
                 if ha_enabled:
@@ -567,7 +570,10 @@ def main() -> None:
                 # 5. Render live dashboard
                 sys.stdout.write("\033[H\033[J") # Clear console screen
                 print(color("=== TEMTOP LKC-1000S+ REAL-TIME MONITOR ===", Colors.HEADER + Colors.BOLD))
-                print(f"Log File:   {color(args.output, Colors.CYAN)}")
+                if not args.no_csv:
+                    print(f"Log File:   {color(args.output, Colors.CYAN)}")
+                else:
+                    print(f"Log File:   {color('Disabled', Colors.WARNING)}")
                 print(f"Port:       {color(args.port, Colors.CYAN)} | Baud: {args.baud}")
                 print(f"PC Time:    {pc_timestamp}")
                 print(f"Device RTC: {dev_time_str}")
